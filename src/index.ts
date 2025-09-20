@@ -560,12 +560,7 @@ export default {
 			.split(',')
 			.map((s) => s.trim())
 			.filter((s) => s.length > 0);
-		const defaultOrigins = [
-			'http://localhost:3000',
-			'https://democracy.thirdlf03.com',
-		];
 		const allowedOrigins = new Set<string>([
-			...defaultOrigins,
 			...configuredOrigins,
 		]);
 
