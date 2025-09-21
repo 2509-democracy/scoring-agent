@@ -2,13 +2,13 @@
  * Hackathon AI Judge - Cloudflare Agents with Orchestrator-Workers Pattern
  *
  * This worker implements an AI-powered hackathon judging system using the Orchestrator-Workers pattern:
- * - Orchestrator: Creates 4 evaluation tasks (theme match, originality, tech compatibility, feasibility)
+ * - Orchestrator: Creates 3 evaluation tasks (business feasibility, business value, technical validity)
  * - Workers: Each worker uses a different AI model to evaluate one specific criterion
  * - Integration: Combines all evaluations into a standardized score format
  *
  * Usage:
  * POST request with JSON body: { "idea": "your idea", "technology": "tech stack", "theme": "optional theme" }
- * Returns: Formatted evaluation with SCORE: [total] and detailed breakdown
+ * Returns: JSON formatted evaluation with total score and detailed breakdown
  *
  * - Run `npm run dev` in your terminal to start a development server
  * - Open a browser tab at http://localhost:8787/ to see your worker in action
@@ -27,12 +27,33 @@ interface Env {
 	MyAgent: AgentNamespace<MyAgent>;
 	AI: Ai;
 	CORS_ALLOWED_ORIGINS?: string;
+	IMAGE_API_URL?: string;
+}
+
+// AIEvaluationRequestインターフェース
+export interface AIEvaluationRequest {
+	theme: string;
+	direction: string;
+	idea: string;
+	techNames: string[];
+}
+
+// AIEvaluationResponseインターフェース
+export interface AIEvaluationResponse {
+	totalScore: number;
+	comment: string;
+	generatedImageUrl?: string;
+	breakdown: {
+		criteria1: number;    // 採点項目1（20点満点）
+		criteria2: number;    // 採点項目2（20点満点）
+		criteria3: number;    // 採点項目3（20点満点）
+	};
 }
 
 // 評価タスクのスキーマ
 const EvaluationTaskSchema = z.object({
 	taskId: z.string(),
-	criterion: z.enum(['theme_match', 'originality', 'tech_compatibility', 'feasibility']),
+	criterion: z.enum(['business_feasibility', 'business_value', 'technical_validity']),
 	maxScore: z.number(),
 	description: z.string(),
 });
@@ -51,68 +72,53 @@ const EvaluationResultSchema = z.object({
 // 最終評価結果のスキーマ
 const FinalEvaluationSchema = z.object({
 	totalScore: z.number(),
-	themeMatch: z.object({
+	businessFeasibility: z.object({
 		score: z.number(),
 		reason: z.string(),
 	}),
-	originality: z.object({
+	businessValue: z.object({
 		score: z.number(),
 		reason: z.string(),
 	}),
-	techCompatibility: z.object({
-		score: z.number(),
-		reason: z.string(),
-	}),
-	feasibility: z.object({
+	technicalValidity: z.object({
 		score: z.number(),
 		reason: z.string(),
 	}),
 });
 
+
 // 型定義
 type EvaluationTask = z.infer<typeof EvaluationTaskSchema>;
 type EvaluationResult = z.infer<typeof EvaluationResultSchema>;
-type FinalEvaluation = z.infer<typeof FinalEvaluationSchema>;
 
-interface HackathonEvaluationResult {
-	tasks: EvaluationTask[];
-	results: EvaluationResult[];
-	finalScore: string;
-}
 
 /**
- * 評価オーケストレーター: 4つの評価観点のタスクを作成・配信
+ * 評価オーケストレーター: 3つの評価観点のタスクを作成・配信
  */
 class EvaluationOrchestrator {
 	constructor(private workersai: ReturnType<typeof createWorkersAI>) { }
 
-	createEvaluationTasks(idea: string, technology: string, theme?: string): EvaluationTask[] {
+	createEvaluationTasks(idea: string, technology: string, theme?: string, direction?: string): EvaluationTask[] {
 		const timestamp = Date.now();
 
 		return [
 			{
-				taskId: `theme-match-${timestamp}`,
-				criterion: 'theme_match' as const,
+				taskId: `business-feasibility-${timestamp}`,
+				criterion: 'business_feasibility' as const,
 				maxScore: 20,
-				description: 'テーマへの合致度（20点）: アイデアがテーマに沿っているか',
+				description: 'ビジネス的実現性（20点）: ビジネスモデルとしての実現可能性',
 			},
 			{
-				taskId: `originality-${timestamp}`,
-				criterion: 'originality' as const,
-				maxScore: 30,
-				description: 'アイデアの独創性（30点）: 他と差別化できるユニークさ',
-			},
-			{
-				taskId: `tech-compatibility-${timestamp}`,
-				criterion: 'tech_compatibility' as const,
+				taskId: `business-value-${timestamp}`,
+				criterion: 'business_value' as const,
 				maxScore: 20,
-				description: 'アイデアと技術の親和性（20点）: アイデアと技術の組み合わせの適切さ',
+				description: 'ビジネス的価値（20点）: 市場価値と収益性の見込み',
 			},
 			{
-				taskId: `feasibility-${timestamp}`,
-				criterion: 'feasibility' as const,
-				maxScore: 30,
-				description: '実現可能性（30点）: 現実的な実装が可能か',
+				taskId: `technical-validity-${timestamp}`,
+				criterion: 'technical_validity' as const,
+				maxScore: 20,
+				description: '技術の妥当性（20点）: 技術選択と実装の適切さ',
 			}
 		];
 	}
@@ -128,19 +134,17 @@ class EvaluationWorker {
 	 * 評価観点に応じて適切なAIモデルを選択
 	 */
 	private selectModelForCriterion(criterion: string): ReturnType<typeof this.workersai> {
+		// JSON MODEサポートモデルを使用
 		switch (criterion) {
-			case 'theme_match':
-				// テーマへの合致度: テーマ理解に優れたモデル
+			case 'business_feasibility':
+				// ビジネス的実現性: ビジネス分析に優れたモデル
 				return this.workersai("@cf/meta/llama-3.1-8b-instruct");
-			case 'originality':
-				// アイデアの独創性: 創造性評価に優れたモデル
+			case 'business_value':
+				// ビジネス的価値: 市場価値評価に優れたモデル
 				return this.workersai("@cf/google/gemma-3-12b-it");
-			case 'tech_compatibility':
-				// 技術親和性: 技術理解に優れたモデル
+			case 'technical_validity':
+				// 技術の妥当性: 技術評価に優れたモデル
 				return this.workersai("@cf/qwen/qwen2.5-coder-32b-instruct");
-			case 'feasibility':
-				// 実現可能性: 実装可能性判断に優れたモデル
-				return this.workersai("@cf/meta/llama-3.2-3b-instruct");
 			default:
 				return this.workersai("@cf/meta/llama-3.1-8b-instruct");
 		}
@@ -150,115 +154,85 @@ class EvaluationWorker {
 	 * 評価観点別のシステムプロンプトを取得
 	 */
 	private getSystemPromptForCriterion(criterion: string): string {
-		const basePrompt = 'あなたはハッカソンの専門審査員です。公正で客観的な評価を行ってください。レスポンスは必ず有効なJSON形式のみで返してください。';
+		const basePrompt = 'あなたはビジネス・技術の専門審査員です。公正で客観的な評価を行ってください。レスポンスは必ず有効なJSON形式のみで返してください。 理由は一言で';
 
 		switch (criterion) {
-			case 'theme_match':
-				return `${basePrompt} テーマへの合致度を専門的に評価してください。テーマとアイデアの関連性、テーマの本質的な理解度を重視してください。`;
-			case 'originality':
-				return `${basePrompt} アイデアの独創性を専門的に評価してください。新規性、ユニークさ、既存アイデアとの差別化を重視してください。`;
-			case 'tech_compatibility':
-				return `${basePrompt} アイデアと技術の親和性を専門的に評価してください。技術選択の適切さ、実装の効率性を重視してください。`;
-			case 'feasibility':
-				return `${basePrompt} 実現可能性を専門的に評価してください。技術的実装可能性、リソース要件、開発期間を重視してください。`;
+			case 'business_feasibility':
+				return `${basePrompt} ビジネス的実現性を専門的に評価してください。収益モデル、市場参入の容易さ、競合優位性、運営コストなどを重視してください。`;
+			case 'business_value':
+				return `${basePrompt} ビジネス的価値を専門的に評価してください。市場規模、収益性、成長ポテンシャル、社会的価値などを重視してください。`;
+			case 'technical_validity':
+				return `${basePrompt} 技術の妥当性を専門的に評価してください。技術選択の適切さ、実装の現実性、拡張性、保守性などを重視してください。`;
 			default:
 				return basePrompt;
 		}
 	}
 
-	async evaluateTask(task: EvaluationTask, idea: string, technology: string, theme?: string): Promise<EvaluationResult> {
+	async evaluateTask(task: EvaluationTask, idea: string, technology: string, theme?: string, direction?: string): Promise<EvaluationResult> {
 		try {
 			const model = this.selectModelForCriterion(task.criterion);
 			const systemPrompt = this.getSystemPromptForCriterion(task.criterion);
 
 			const themeContext = theme ? `テーマ: ${theme}\n` : '';
+			const directionContext = direction ? `方向性: ${direction}\n` : '';
 
 			const evaluationStream = await streamText({
 				model: model,
-				system: `${systemPrompt} 必ず以下のJSON形式のみで回答してください。前置きや説明文、思考過程は一切含めず、純粋なJSONオブジェクトのみを出力してください。`,
-				prompt: `${themeContext}アイデア: ${idea}
-使用技術: ${technology}
+				system: `${systemPrompt} JSON形式のみで回答。理由は一言で。`,
+				prompt: `${themeContext}${directionContext}アイデア: ${idea}
+技術: ${technology}
 
 評価観点: ${task.description}
 最大点: ${task.maxScore}点
 
-重要: 以下のJSON形式のみで回答してください。他のテキストは一切含めないでください:
-
-{"score": [0-${task.maxScore}の整数], "reason": "評価理由を具体的に説明"}`,
+JSON回答:
+{"score": [0-${task.maxScore}の整数], "reason": "一言コメント"}`,
 			});
 
 			const evaluationText = await evaluationStream.text;
 			console.log(`🔍 AI Response for ${task.criterion}:`, evaluationText.substring(0, 200) + '...');
 
-			// 複数の方法でJSONを抽出を試行
+			// 改善されたJSON解析処理
 			let evaluation = null;
-			let extractedJson = '';
 
-			// 方法1: 最初の完全なJSONオブジェクトを抽出
-			const jsonMatches = evaluationText.match(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g);
-			if (jsonMatches && jsonMatches.length > 0) {
-				for (const match of jsonMatches) {
-					try {
-						evaluation = JSON.parse(match);
-						extractedJson = match;
-						break;
-					} catch (e) {
-						continue;
-					}
+			try {
+				// 方法1: 完全なJSONオブジェクトを解析
+				const jsonMatch = evaluationText.match(/\{[^{}]*"score"\s*:\s*\d+[^{}]*"reason"\s*:[^{}]*\}/);
+				if (jsonMatch) {
+					evaluation = JSON.parse(jsonMatch[0]);
 				}
+			} catch (e) {
+				// JSON解析失敗時は次の方法へ
 			}
 
-			// 方法2: scoreとreasonを直接抽出
+			// 方法2: scoreとreasonを個別に抽出（より安全）
 			if (!evaluation) {
 				const scoreMatch = evaluationText.match(/"score"\s*:\s*(\d+)/);
-				const reasonMatch = evaluationText.match(/"reason"\s*:\s*"([^"]+)"/);
+				let reasonMatch = evaluationText.match(/"reason"\s*:\s*"([^"]{1,20})"/); // 20文字制限
 
-				if (scoreMatch && reasonMatch) {
+				// reasonが見つからない場合の追加パターン
+				if (!reasonMatch) {
+					reasonMatch = evaluationText.match(/理由[:\s]*([^\n]{1,15})/);
+				}
+
+				if (scoreMatch) {
 					evaluation = {
-						score: parseInt(scoreMatch[1]),
-						reason: reasonMatch[1]
+						score: Math.max(0, Math.min(task.maxScore, parseInt(scoreMatch[1]))),
+						reason: reasonMatch ? reasonMatch[1].trim() : '評価完了'
 					};
-					extractedJson = `{"score": ${scoreMatch[1]}, "reason": "${reasonMatch[1]}"}`;
 				}
 			}
 
-			// 方法3: 数値とテキストを正規表現で抽出
+			// 方法3: 数値のみ抽出（最小限のフォールバック）
 			if (!evaluation) {
-				const scorePattern = /(?:score|点数|評価)[:\s]*(\d+)/i;
-				const reasonPattern = /(?:reason|理由)[:\s]*["']?([^"'\n]{10,})["']?/i;
-
+				const scorePattern = /(\d+)\s*[点\/]/;
 				const scoreMatch = evaluationText.match(scorePattern);
-				const reasonMatch = evaluationText.match(reasonPattern);
 
 				if (scoreMatch) {
+					const score = Math.max(0, Math.min(task.maxScore, parseInt(scoreMatch[1])));
 					evaluation = {
-						score: parseInt(scoreMatch[1]),
-						reason: reasonMatch ? reasonMatch[1].trim() : `${task.criterion}の評価を実行しました`
-					};
-				}
-			}
-
-			// 方法4: 空のscoreフィールドを修正
-			if (!evaluation) {
-				const brokenJsonMatch = evaluationText.match(/\{"score":\s*,\s*"reason":\s*"([^"]+)"\}/);
-				if (brokenJsonMatch) {
-					evaluation = {
-						score: Math.floor(task.maxScore * 0.6), // デフォルト60%
-						reason: brokenJsonMatch[1]
-					};
-				}
-			}
-
-			// 方法5: 思考タグを除去してから再試行
-			if (!evaluation && evaluationText.includes('<think>')) {
-				const cleanText = evaluationText.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
-				const scoreMatch = cleanText.match(/(?:score|点数)[:\s]*(\d+)/i);
-				const reasonMatch = cleanText.match(/(?:reason|理由)[:\s]*["']?([^"'\n]{10,})["']?/i);
-
-				if (scoreMatch) {
-					evaluation = {
-						score: parseInt(scoreMatch[1]),
-						reason: reasonMatch ? reasonMatch[1].trim() : `${task.criterion}の評価を実行しました`
+						score: score,
+						reason: `${task.criterion}評価: ${score}点`
 					};
 				}
 			}
@@ -302,152 +276,99 @@ class EvaluationWorker {
 }
 
 /**
- * 評価統合機能: 4つの評価結果を指定フォーマットで統合
+ * 画像生成機能: 外部APIで画像を生成
+ */
+class ImageGenerator {
+	private readonly imageApiUrl: string;
+
+	constructor(imageApiUrl?: string) {
+		this.imageApiUrl = imageApiUrl;
+	}
+
+	async generateImage(idea: string): Promise<string | null> {
+		try {
+			console.log('🎨 画像生成開始:', idea);
+			const response = await fetch(this.imageApiUrl, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+				},
+				body: JSON.stringify({ idea }),
+			});
+
+			if (!response.ok) {
+				console.error('❌ 画像生成API呼び出し失敗:', response.status);
+				return null;
+			}
+
+			const result = await response.json() as {
+				success: boolean;
+				imageUrl?: string;
+				message?: string;
+			};
+
+			if (result.success && result.imageUrl) {
+				console.log('✅ 画像生成成功:', result.imageUrl);
+				return result.imageUrl;
+			} else {
+				console.error('❌ 画像生成失敗:', result.message);
+				return null;
+			}
+		} catch (error) {
+			console.error('❌ 画像生成エラー:', error);
+			return null;
+		}
+	}
+}
+
+/**
+ * 評価統合機能: 3つの評価結果をAIEvaluationResponse形式で統合
  */
 class EvaluationIntegrator {
 	constructor(private workersai: ReturnType<typeof createWorkersAI>) { }
 
-	async integrateEvaluations(results: EvaluationResult[]): Promise<string> {
-		try {
-			const themeMatch = results.find(r => r.criterion === 'theme_match');
-			const originality = results.find(r => r.criterion === 'originality');
-			const techCompatibility = results.find(r => r.criterion === 'tech_compatibility');
-			const feasibility = results.find(r => r.criterion === 'feasibility');
+	async integrateEvaluations(results: EvaluationResult[], generatedImageUrl?: string): Promise<AIEvaluationResponse> {
+		const businessFeasibility = results.find(r => r.criterion === 'business_feasibility');
+		const businessValue = results.find(r => r.criterion === 'business_value');
+		const technicalValidity = results.find(r => r.criterion === 'technical_validity');
 
+		const totalScore = results.reduce((sum, result) => sum + result.score, 0);
 
-			const totalScore = results.reduce((sum, result) => sum + result.score, 0);
+		// 総合コメントを生成
+		const comments = results.filter(r => r.reason).map(r => r.reason);
+		const comment = comments.length > 0
+			? `総合評価: ${comments.join('、')}`
+			: '評価が完了しました。';
 
-			const model = this.workersai("@cf/meta/llama-3.2-3b-instruct");
+		console.log('🎯 評価結果統合完了');
 
-			const summaryPrompt = `あなたは評価結果をまとめる専門家です。以下の評価結果を必ず指定された形式でまとめてください。
-
-評価結果:
-- テーマへの合致度: ${themeMatch?.score || 0}/20点 理由: ${themeMatch?.reason || '評価エラー'}
-- アイデアの独創性: ${originality?.score || 0}/30点 理由: ${originality?.reason || '評価エラー'}
-- アイデアと技術の親和性: ${techCompatibility?.score || 0}/20点 理由: ${techCompatibility?.reason || '評価エラー'}
-- 実現可能性: ${feasibility?.score || 0}/30点 理由: ${feasibility?.reason || '評価エラー'}
-
-合計点: ${totalScore}点
-
-**重要: 以下の形式で必ず出力してください。この形式以外は絶対に使用しないでください:**
-
-SCORE: [合計点]
-        テーマへの合致度: [点数]/20点 理由: [理由]
-        アイデアの独創性: [点数]/30点 理由: [理由]
-        アイデアと技術の親和性: [点数]/20点 理由: [理由]
-        実現可能性: [点数]/30点 理由: [理由]
-
-この形式を厳密に守って出力してください。前置きや説明は一切不要です。`;
-
-			const summaryStream = await streamText({
-				model: model,
-				system: "あなたは評価結果をまとめる専門家です。指定された形式を厳密に守って出力してください。前置きや説明文は一切含めず、指定された形式のみで回答してください。",
-				prompt: summaryPrompt,
-			});
-
-			const summaryText = await summaryStream.text;
-
-			// AIの出力から指定形式を抽出
-			const scorePattern = /SCORE:\s*(\d+)/;
-			const themePattern = /テーマへの合致度:\s*(\d+)\/20点\s*理由:\s*(.+?)(?=\n|アイデアの独創性|$)/;
-			const originalityPattern = /アイデアの独創性:\s*(\d+)\/30点\s*理由:\s*(.+?)(?=\n|アイデアと技術|$)/;
-			const techPattern = /アイデアと技術の親和性:\s*(\d+)\/20点\s*理由:\s*(.+?)(?=\n|実現可能性|$)/;
-			const feasibilityPattern = /実現可能性:\s*(\d+)\/30点\s*理由:\s*(.+?)(?=\n|$)/;
-
-			// パターンマッチングで抽出
-			const scoreMatch = summaryText.match(scorePattern);
-			const themeMatchResult = summaryText.match(themePattern);
-			const originalityMatchResult = summaryText.match(originalityPattern);
-			const techMatchResult = summaryText.match(techPattern);
-			const feasibilityMatchResult = summaryText.match(feasibilityPattern);
-
-			// 抽出できた場合はそれを使用、できなかった場合は元の値を使用
-			const finalScore = scoreMatch ? scoreMatch[1] : totalScore.toString();
-			const finalThemeScore = themeMatchResult ? themeMatchResult[1] : (themeMatch?.score || 0).toString();
-			const finalThemeReason = themeMatchResult ? themeMatchResult[2].trim() : (themeMatch?.reason || '評価エラー');
-			const finalOriginalityScore = originalityMatchResult ? originalityMatchResult[1] : (originality?.score || 0).toString();
-			const finalOriginalityReason = originalityMatchResult ? originalityMatchResult[2].trim() : (originality?.reason || '評価エラー');
-			const finalTechScore = techMatchResult ? techMatchResult[1] : (techCompatibility?.score || 0).toString();
-			const finalTechReason = techMatchResult ? techMatchResult[2].trim() : (techCompatibility?.reason || '評価エラー');
-			const finalFeasibilityScore = feasibilityMatchResult ? feasibilityMatchResult[1] : (feasibility?.score || 0).toString();
-			const finalFeasibilityReason = feasibilityMatchResult ? feasibilityMatchResult[2].trim() : (feasibility?.reason || '評価エラー');
-
-			// 指定フォーマットで確実に出力
-			const formattedResult = this.formatEvaluationResult(
-				finalScore,
-				finalThemeScore,
-				finalThemeReason,
-				finalOriginalityScore,
-				finalOriginalityReason,
-				finalTechScore,
-				finalTechReason,
-				finalFeasibilityScore,
-				finalFeasibilityReason
-			);
-
-			console.log('🎯 最終評価結果:', formattedResult);
-			return formattedResult;
-
-		} catch (error) {
-			// エラー時のフォールバック: 元の形式で出力
-			console.warn('⚠️ 統合処理でエラーが発生、フォールバック出力を使用:', error);
-
-			const themeMatch = results.find(r => r.criterion === 'theme_match');
-			const originality = results.find(r => r.criterion === 'originality');
-			const techCompatibility = results.find(r => r.criterion === 'tech_compatibility');
-			const feasibility = results.find(r => r.criterion === 'feasibility');
-			const totalScore = results.reduce((sum, result) => sum + result.score, 0);
-
-			return this.formatEvaluationResult(
-				totalScore,
-				themeMatch?.score || 0,
-				themeMatch?.reason || '評価エラー',
-				originality?.score || 0,
-				originality?.reason || '評価エラー',
-				techCompatibility?.score || 0,
-				techCompatibility?.reason || '評価エラー',
-				feasibility?.score || 0,
-				feasibility?.reason || '評価エラー'
-			);
-		}
+		return {
+			totalScore,
+			comment,
+			generatedImageUrl,
+			breakdown: {
+				criteria1: businessFeasibility?.score || 0,
+				criteria2: businessValue?.score || 0,
+				criteria3: technicalValidity?.score || 0,
+			}
+		};
 	}
 
-	/**
-	 * スコア評価結果を指定フォーマットで整形する
-	 */
-	private formatEvaluationResult(
-		totalScore: string | number,
-		themeScore: string | number,
-		themeReason: string,
-		originalityScore: string | number,
-		originalityReason: string,
-		techScore: string | number,
-		techReason: string,
-		feasibilityScore: string | number,
-		feasibilityReason: string
-	): string {
-		return `SCORE: ${totalScore}
-        テーマへの合致度: ${themeScore}/20点 理由: ${themeReason}
-        アイデアの独創性: ${originalityScore}/30点 理由: ${originalityReason}
-        アイデアと技術の親和性: ${techScore}/20点 理由: ${techReason}
-        実現可能性: ${feasibilityScore}/30点 理由: ${feasibilityReason}`;
-	}
 }
 
 export class MyAgent extends Agent<Env> {
 	async onRequest(request: Request) {
 		try {
-			const data = await request.json<{
-				idea?: string;
-				technology?: string;
-				theme?: string;
-				prompt?: string;
-			}>();
+			const data = await request.json<AIEvaluationRequest | { prompt?: string }>();
 
-			if (data.idea && data.technology) {
-				const result = await this.evaluateHackathonIdea(data.idea, data.technology, data.theme);
+			// AIEvaluationRequest形式の評価リクエスト
+			if ('theme' in data && 'direction' in data && 'idea' in data && 'techNames' in data) {
+				const evaluationData = data as AIEvaluationRequest;
+				const result = await this.evaluateHackathonIdea(evaluationData);
 				return Response.json(result);
-			} else if (data.prompt) {
+			} 
+			// 従来のプロンプト形式（後方互換性）
+			else if ('prompt' in data && data.prompt) {
 				const stream = await this.callAIModel(data.prompt);
 				return stream.toTextStreamResponse({
 					headers: {
@@ -458,7 +379,7 @@ export class MyAgent extends Agent<Env> {
 				});
 			} else {
 				return Response.json({
-					error: 'Invalid request. Provide "idea" and "technology" for evaluation, or "prompt" for simple AI chat'
+					error: 'Invalid request. Provide AIEvaluationRequest format: { theme, direction, idea, techNames } for evaluation, or { prompt } for simple AI chat'
 				}, { status: 400 });
 			}
 		} catch (error) {
@@ -472,72 +393,64 @@ export class MyAgent extends Agent<Env> {
 	/**
 	 * ハッカソンAI審査員による評価を実行
 	 */
-	async evaluateHackathonIdea(idea: string, technology: string, theme?: string): Promise<HackathonEvaluationResult> {
+	async evaluateHackathonIdea(request: AIEvaluationRequest): Promise<AIEvaluationResponse> {
 		const workersai = createWorkersAI({ binding: this.env.AI });
 
 		try {
-			// 1. オーケストレーター: 4つの評価タスクを作成
+			// リクエストから必要な情報を取得
+			const { theme, direction, idea, techNames } = request;
+			
+			// 1. オーケストレーター: 3つの評価タスクを作成
 			const orchestrator = new EvaluationOrchestrator(workersai);
-			const tasks = orchestrator.createEvaluationTasks(idea, technology, theme);
+			const tasks = orchestrator.createEvaluationTasks(idea, techNames.join(', '), theme, direction);
 
-			// 2. ワーカー: 4つの評価観点を並列実行
+			// 2. 並列実行: AI評価と画像生成を同時実行
 			const worker = new EvaluationWorker(workersai);
-			console.log(`🎯 ${tasks.length}個の評価タスクを並列実行開始...`);
+			const imageGenerator = new ImageGenerator(this.env.IMAGE_API_URL);
+
+			console.log(`🎯 ${tasks.length}個の評価タスクと画像生成を並列実行開始...`);
 			const startTime = Date.now();
 
-			const results = await Promise.all(
-				tasks.map(async (task, index) => {
-					console.log(`📊 評価ワーカー${index + 1}: ${task.description} の評価開始`);
-					const taskStartTime = Date.now();
-					const result = await worker.evaluateTask(task, idea, technology, theme);
-					const taskEndTime = Date.now();
-					console.log(`✅ 評価ワーカー${index + 1}: ${task.criterion} 完了 (${result.score}/${task.maxScore}点, ${taskEndTime - taskStartTime}ms)`);
-					return result;
-				})
-			);
+			// AI評価と画像生成を並列実行
+			const [results, generatedImageUrl] = await Promise.all([
+				// AI評価タスクの並列実行
+				Promise.all(
+					tasks.map(async (task, index) => {
+						console.log(`📊 評価ワーカー${index + 1}: ${task.description} の評価開始`);
+						const taskStartTime = Date.now();
+						const result = await worker.evaluateTask(task, idea, techNames.join(', '), theme, direction);
+						const taskEndTime = Date.now();
+						console.log(`✅ 評価ワーカー${index + 1}: ${task.criterion} 完了 (${result.score}/${task.maxScore}点, ${taskEndTime - taskStartTime}ms)`);
+						return result;
+					})
+				),
+				// 画像生成の並列実行
+				imageGenerator.generateImage(idea)
+			]);
 
 			const endTime = Date.now();
-			console.log(`🎉 全評価完了: ${endTime - startTime}ms`);
+			console.log(`🎉 全処理完了: ${endTime - startTime}ms`);
 
-			// 3. 統合: 評価結果を指定フォーマットで統合
+			// 3. 統合: 評価結果と画像URLを指定フォーマットで統合
 			const integrator = new EvaluationIntegrator(workersai);
-			const finalScore = await integrator.integrateEvaluations(results);
+			const finalEvaluation = await integrator.integrateEvaluations(results, generatedImageUrl || undefined);
 
-			return {
-				tasks,
-				results,
-				finalScore,
-			};
+			return finalEvaluation;
 		} catch (error) {
 			// フォールバック: エラー時の評価結果を返す
-			const fallbackTasks: EvaluationTask[] = [
-				{ taskId: "fallback-theme", criterion: "theme_match", maxScore: 20, description: "テーマへの合致度" },
-				{ taskId: "fallback-originality", criterion: "originality", maxScore: 30, description: "アイデアの独創性" },
-				{ taskId: "fallback-tech", criterion: "tech_compatibility", maxScore: 20, description: "技術親和性" },
-				{ taskId: "fallback-feasibility", criterion: "feasibility", maxScore: 30, description: "実現可能性" }
-			];
+			console.error('⚠️ 評価処理でエラーが発生:', error);
 
-			const fallbackResults: EvaluationResult[] = fallbackTasks.map(task => ({
-				taskId: task.taskId,
-				criterion: task.criterion,
-				score: 0,
-				maxScore: task.maxScore,
-				reason: '評価中にエラーが発生しました。',
-				success: false,
-				error: error instanceof Error ? error.message : 'Unknown error'
-			}));
-
-			const fallbackScore = `SCORE: 0
-テーマへの合致度: 0/20点 理由: 評価中にエラーが発生しました
-アイデアの独創性: 0/30点 理由: 評価中にエラーが発生しました
-アイデアと技術の親和性: 0/20点 理由: 評価中にエラーが発生しました
-実現可能性: 0/30点 理由: 評価中にエラーが発生しました`;
-
-			return {
-				tasks: fallbackTasks,
-				results: fallbackResults,
-				finalScore: fallbackScore,
+			const fallbackEvaluation: AIEvaluationResponse = {
+				totalScore: 0,
+				comment: '評価中にエラーが発生しました',
+				breakdown: {
+					criteria1: 0,    // ビジネス的実現性（20点満点）
+					criteria2: 0,    // ビジネス的価値（20点満点）
+					criteria3: 0,    // 技術の妥当性（20点満点）
+				}
 			};
+
+			return fallbackEvaluation;
 		}
 	}
 
@@ -554,41 +467,17 @@ export class MyAgent extends Agent<Env> {
 
 export default {
 	async fetch(request: Request, env: Env) {
-		// --- CORS setup ---
-		const origin = request.headers.get('Origin');
-		const configuredOrigins = (env.CORS_ALLOWED_ORIGINS || '')
-			.split(',')
-			.map((s) => s.trim())
-			.filter((s) => s.length > 0);
-		const allowedOrigins = new Set<string>([
-			...configuredOrigins,
-		]);
-
-		const isAllowedOrigin = origin != null && allowedOrigins.has(origin);
-
+		// --- CORS setup - Allow all origins ---
 		const corsHeaders = new Headers({
+			'Access-Control-Allow-Origin': '*',
 			'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
 			'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 			'Access-Control-Max-Age': '86400',
-			'Vary': 'Origin',
 		});
-
-		if (isAllowedOrigin && origin) {
-			corsHeaders.set('Access-Control-Allow-Origin', origin);
-		}
 
 		// Preflight request
 		if (request.method === 'OPTIONS') {
-			// Handle CORS preflight
-			if (!isAllowedOrigin) {
-				return new Response('CORS origin not allowed', { status: 403, headers: corsHeaders });
-			}
 			return new Response(null, { status: 204, headers: corsHeaders });
-		}
-
-		// Block disallowed cross-origin requests (when Origin header is present)
-		if (origin && !isAllowedOrigin) {
-			return new Response('CORS origin not allowed', { status: 403, headers: corsHeaders });
 		}
 
 		const agentId = new URL(request.url).searchParams.get('agent-id') || 'default-agent';
